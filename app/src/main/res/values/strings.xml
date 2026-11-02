@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">ImprimeYa</string>
+    <string name="config_title">Configuración de Impresora Térmica</string>
+    <string name="ip_label">IP de la impresora (Ej: 192.168.1.50)</string>
+    <string name="save_ip">Guardar IP</string>
+    <string name="ip_saved">IP guardada correctamente.</string>
+    <string name="printer_name">Impresora Térmica</string>
+</resources>
