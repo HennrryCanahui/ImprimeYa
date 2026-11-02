@@ -9,12 +9,24 @@ import java.io.File
 
 object EscPos {
 
-    fun pdfToEscPos(file: File, widthDots: Int): ByteArray {
+    /**
+     * Convierte un archivo PDF a comandos de imagen raster ESC/POS (GS v 0).
+     * @param file Archivo PDF temporal a renderizar.
+     * @param widthDots Ancho imprimible en puntos (576 puntos para rollos de 80mm).
+     */
+    fun pdfToEscPos(file: File, widthDots: Int = 576): ByteArray {
         val out = ByteArrayOutputStream()
-        out.write(byteArrayOf(0x1B, 0x40)) // ESC @ : inicializar
+        // ESC @ : Inicializar impresora
+        out.write(byteArrayOf(0x1B, 0x40))
 
         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        val renderer = PdfRenderer(pfd)
+        val renderer = try {
+            PdfRenderer(pfd)
+        } catch (e: Exception) {
+            pfd.close()
+            throw e
+        }
+
         try {
             for (i in 0 until renderer.pageCount) {
                 val page = renderer.openPage(i)
@@ -34,8 +46,9 @@ object EscPos {
             pfd.close()
         }
 
-        // Avanzar papel y cortar (si tu impresora no tiene cortador, se ignora)
-        out.write(byteArrayOf(0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x42, 0x00))
+        // Avanzar 3 líneas (ESC d 3) y ejecutar corte parcial/total (GS V 66 0)
+        out.write(byteArrayOf(0x1B, 0x64, 0x03))
+        out.write(byteArrayOf(0x1D, 0x56, 0x42, 0x00))
         return out.toByteArray()
     }
 
@@ -51,7 +64,7 @@ object EscPos {
             return lum < 128
         }
 
-        // Recortar filas en blanco al final (evita gastar papel)
+        // Recortar filas en blanco al final de la página para ahorrar papel
         var lastRow = h - 1
         while (lastRow > 0 && (0 until w).none { isDark(px[lastRow * w + it]) }) lastRow--
         val rows = lastRow + 1
@@ -59,12 +72,14 @@ object EscPos {
         var y = 0
         while (y < rows) {
             val chunk = minOf(255, rows - y)
-            // GS v 0 m xL xH yL yH
-            out.write(byteArrayOf(
-                0x1D, 0x76, 0x30, 0x00,
-                (bytesPerRow and 0xFF).toByte(), (bytesPerRow shr 8).toByte(),
-                (chunk and 0xFF).toByte(), (chunk shr 8).toByte()
-            ))
+            // Comando ESC/POS GS v 0 m xL xH yL yH
+            out.write(
+                byteArrayOf(
+                    0x1D, 0x76, 0x30, 0x00,
+                    (bytesPerRow and 0xFF).toByte(), (bytesPerRow shr 8).toByte(),
+                    (chunk and 0xFF).toByte(), (chunk shr 8).toByte()
+                )
+            )
             for (row in y until y + chunk) {
                 for (bx in 0 until bytesPerRow) {
                     var b = 0

@@ -1,8 +1,8 @@
 package com.example.imprimeya
 
-import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.print.PrintAttributes
 import android.print.PrintAttributes.MediaSize
 import android.print.PrinterCapabilitiesInfo
@@ -15,76 +15,108 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import android.os.ParcelFileDescriptor
 import kotlin.concurrent.thread
 
 class ThermalPrintService : PrintService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // 80 mm ≈ 576 puntos a 203 dpi | 58 mm ≈ 384 puntos
-    private val paperWidthDots = 576
-
-    override fun onCreatePrinterDiscoverySession(): PrinterDiscoverySession =
-        ThermalDiscoverySession()
+    override fun onCreatePrinterDiscoverySession(): PrinterDiscoverySession {
+        return ThermalDiscoverySession()
+    }
 
     override fun onRequestCancelPrintJob(printJob: PrintJob) {
-        printJob.cancel()
+        if (printJob.isQueued || printJob.isStarted) {
+            printJob.cancel()
+        }
     }
 
     override fun onPrintJobQueued(printJob: PrintJob) {
-        // Esto corre en el hilo principal: aquí sí se puede llamar start()
-        printJob.start()
+        // 1. Iniciar inmediatamente el trabajo de impresión en el spooler del sistema
+        if (printJob.isQueued) {
+            printJob.start()
+        }
 
         val pfd = printJob.document.data
         if (pfd == null) {
-            printJob.fail("No se pudo leer el documento")
+            printJob.fail("No se pudo obtener el documento de impresión.")
             return
         }
 
-        // Copiamos el PDF a un archivo temporal (PdfRenderer necesita un fd "seekable")
-        val tmp = File(cacheDir, "job_${System.currentTimeMillis()}.pdf")
-
-        thread {
+        // 2. Hilo de fondo autónomo para procesamiento y envío en red TCP sin congelar la interfaz
+        thread(start = true, isDaemon = true, name = "ThermalPrintThread") {
+            val tmpFile = File(cacheDir, "job_${System.currentTimeMillis()}.tmp")
             try {
+                // Copiar el flujo de datos del archivo entrante
                 ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
-                    FileOutputStream(tmp).use { input.copyTo(it) }
-                }
-
-                val prefs = getSharedPreferences("PrinterPrefs", Context.MODE_PRIVATE)
-                val ip = prefs.getString("printer_ip", "") ?: ""
-                if (ip.isBlank()) throw IllegalStateException("Configura la IP de la impresora")
-
-                val data = EscPos.pdfToEscPos(tmp, paperWidthDots)
-
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress(ip, 9100), 5000)
-                    socket.getOutputStream().apply {
-                        write(data)
-                        flush()
+                    FileOutputStream(tmpFile).use { output ->
+                        input.copyTo(output)
                     }
                 }
 
-                mainHandler.post { printJob.complete() }
+                val prefs = getSharedPreferences("PrinterPrefs", MODE_PRIVATE)
+                val ip = prefs.getString("printer_ip", "")?.trim()?.ifEmpty { "192.168.1.100" }
+                    ?: "192.168.1.100"
+
+                val isPdf = isPdfFile(tmpFile)
+                val printBytes: ByteArray = if (isPdf) {
+                    // Convertir PDF a comandos raster ESC/POS (GS v 0) a 203 DPI (576 dots para 80mm)
+                    EscPos.pdfToEscPos(tmpFile, widthDots = 576)
+                } else {
+                    // Bytes directos si es texto o ESC/POS nativo
+                    tmpFile.readBytes()
+                }
+
+                // 3. Conexión Socket TCP al puerto 9100 con timeouts estrictos
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(ip, 9100), 5000)
+                    socket.soTimeout = 5000
+                    socket.getOutputStream().use { outputStream ->
+                        outputStream.write(printBytes)
+                        outputStream.flush()
+                    }
+                }
+
+                // 4. Reportar éxito de inmediato al spooler en el hilo principal
+                mainHandler.post {
+                    if (printJob.isStarted) {
+                        printJob.complete()
+                    }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                mainHandler.post { printJob.fail(e.localizedMessage ?: "Error de impresión") }
+                val errorMsg = e.localizedMessage ?: "Error al procesar el trabajo de impresión"
+                mainHandler.post {
+                    if (printJob.isStarted || printJob.isQueued) {
+                        printJob.fail(errorMsg)
+                    }
+                }
             } finally {
-                tmp.delete()
+                tmpFile.delete()
             }
+        }
+    }
+
+    private fun isPdfFile(file: File): Boolean {
+        if (!file.exists() || file.length() < 4) return false
+        return try {
+            val header = ByteArray(4)
+            file.inputStream().use { it.read(header) }
+            header[0] == 0x25.toByte() && header[1] == 0x50.toByte() &&
+                    header[2] == 0x44.toByte() && header[3] == 0x46.toByte()
+        } catch (_: Exception) {
+            false
         }
     }
 
     inner class ThermalDiscoverySession : PrinterDiscoverySession() {
 
-        override fun onStartPrinterDiscovery(priorityList: MutableList<PrinterId>) {
-            val id = generatePrinterId("thermal_printer_1")
+        private fun getThermalPrinterInfo(): PrinterInfo {
+            val printerId = generatePrinterId("thermal_printer_tcp_9100")
+            val mediaSize = MediaSize("ROLL_80", "Rollo 80mm", 3150, 11000)
 
-            // Rollo de 80 mm de ancho (3150 milésimas de pulgada), largo máx. ~ 11"
-            val media = MediaSize("ROLL_80", "Rollo 80mm", 3150, 11000)
-
-            val caps = PrinterCapabilitiesInfo.Builder(id)
-                .addMediaSize(media, true)
+            val capabilities = PrinterCapabilitiesInfo.Builder(printerId)
+                .addMediaSize(mediaSize, true)
                 .addResolution(PrintAttributes.Resolution("r203", "203 dpi", 203, 203), true)
                 .setColorModes(
                     PrintAttributes.COLOR_MODE_MONOCHROME,
@@ -93,17 +125,32 @@ class ThermalPrintService : PrintService() {
                 .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
                 .build()
 
-            val info = PrinterInfo.Builder(id, "Impresora Térmica", PrinterInfo.STATUS_IDLE)
-                .setCapabilities(caps)
+            return PrinterInfo.Builder(printerId, "Impresora Térmica ImprimeYa", PrinterInfo.STATUS_IDLE)
+                .setCapabilities(capabilities)
                 .build()
-
-            addPrinters(listOf(info))
         }
 
-        override fun onStopPrinterDiscovery() {}
-        override fun onValidatePrinters(printerIds: MutableList<PrinterId>) {}
-        override fun onStartPrinterStateTracking(printerId: PrinterId) {}
+        override fun onStartPrinterDiscovery(priorityList: MutableList<PrinterId>) {
+            val printer = getThermalPrinterInfo()
+            addPrinters(listOf(printer))
+        }
+
+        override fun onValidatePrinters(printerIds: MutableList<PrinterId>) {
+            val printer = getThermalPrinterInfo()
+            if (printerIds.contains(printer.id)) {
+                addPrinters(listOf(printer))
+            }
+        }
+
+        override fun onStartPrinterStateTracking(printerId: PrinterId) {
+            val printer = getThermalPrinterInfo()
+            if (printerId == printer.id) {
+                addPrinters(listOf(printer))
+            }
+        }
+
         override fun onStopPrinterStateTracking(printerId: PrinterId) {}
+        override fun onStopPrinterDiscovery() {}
         override fun onDestroy() {}
     }
 }

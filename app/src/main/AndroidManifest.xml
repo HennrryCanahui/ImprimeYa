@@ -32,7 +32,7 @@
         <service
             android:name=".ThermalPrintService"
             android:exported="true"
-            android:label="@string/app_name"
+            android:label="Impresora Térmica ImprimeYa"
             android:permission="android.permission.BIND_PRINT_SERVICE">
             <intent-filter>
                 <action android:name="android.printservice.PrintService" />
