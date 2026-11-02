@@ -84,8 +84,15 @@ class ThermalPrintService : PrintService() {
                 targetIp = prefs.getString("printer_ip", "")?.trim().orEmpty()
                     .ifEmpty { "192.168.1.100" }
 
+                val fontSize = prefs.getInt("font_size", 1)
+                val topMargin = prefs.getInt("top_margin", 0)
+                val bottomMargin = prefs.getInt("bottom_margin", 2)
+                val footerMessage = prefs.getString("footer_message", "¡Gracias por su compra!") ?: ""
+
+                val config = ReceiptConfig(fontSize, topMargin, bottomMargin, footerMessage)
+
                 val bytes = if (isPdfFile(tmpFile)) {
-                    EscPos.pdfToEscPos(tmpFile, PAPER_DOTS)
+                    EscPos.pdfToEscPos(tmpFile, PAPER_DOTS, config)
                 } else {
                     tmpFile.readBytes()
                 }
