@@ -64,7 +64,7 @@ object EscPos {
             return lum < 128
         }
 
-        // Recortar filas en blanco al final de la página para ahorrar papel
+        // Recortar filas en blanco al final
         var lastRow = h - 1
         while (lastRow > 0 && (0 until w).none { isDark(px[lastRow * w + it]) }) lastRow--
         val rows = lastRow + 1
@@ -72,7 +72,6 @@ object EscPos {
         var y = 0
         while (y < rows) {
             val chunk = minOf(255, rows - y)
-            // Comando ESC/POS GS v 0 m xL xH yL yH
             out.write(
                 byteArrayOf(
                     0x1D, 0x76, 0x30, 0x00,
@@ -80,16 +79,22 @@ object EscPos {
                     (chunk and 0xFF).toByte(), (chunk shr 8).toByte()
                 )
             )
+
+            val block = ByteArray(bytesPerRow * chunk)
+            var i = 0
             for (row in y until y + chunk) {
+                val base = row * w
                 for (bx in 0 until bytesPerRow) {
                     var b = 0
+                    val x0 = bx * 8
                     for (bit in 0..7) {
-                        val x = bx * 8 + bit
-                        if (x < w && isDark(px[row * w + x])) b = b or (0x80 shr bit)
+                        val x = x0 + bit
+                        if (x < w && isDark(px[base + x])) b = b or (0x80 shr bit)
                     }
-                    out.write(b)
+                    block[i++] = b.toByte()
                 }
             }
+            out.write(block, 0, block.size)
             y += chunk
         }
     }
